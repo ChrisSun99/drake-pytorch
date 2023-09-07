@@ -51,7 +51,8 @@ class TensorCallable(Protocol):
 def sym_to_pytorch(
     expr: Union[sym.Expression, np.ndarray, List],
     *sym_args: np.ndarray,
-    simplify_computation: Simplifier = Simplifier.ALL
+    simplify_computation: Simplifier = Simplifier.ALL,
+    device: torch.device = torch.device("cuda")
 ) -> Tuple[TensorCallable, str]:
     simplifier = _simplifier_map[simplify_computation]
     str_list = []
@@ -67,9 +68,9 @@ def sym_to_pytorch(
             sympy_expr_i = simplifier(sympy_expr_i)
         rev_vardict = {vardict[k]: k for k in vardict}
         expr_name = sympy_to_pytorch_string(sympy_expr_i, {}, python_lines,
-                                            rev_vardict, sym_args)
+                                            rev_vardict, sym_args, device)
         str_list.extend(python_lines)
-        str_list.append(f'  return {expr_name}\n')
+        str_list.append(f'  return {expr_name}.to("{device}")\n')
     elif isinstance(expr, list) or isinstance(expr, np.ndarray):
         if isinstance(expr, np.ndarray):
             shape = expr.shape
@@ -88,11 +89,11 @@ def sym_to_pytorch(
             rev_vardict = {vardict[k]: k for k in vardict}
             expr_names.append(
                 sympy_to_pytorch_string(sympy_expr_i, memos, python_lines,
-                                        rev_vardict, sym_args))
+                                        rev_vardict, sym_args, device))
         str_list.extend(python_lines)
         expr_indices = ', '.join(expr_names)
-        str_list.append(f'  ret = torch.stack(({expr_indices},), dim = -1)\n')
-        str_list.append(f'  return torch.reshape(ret, batch_dims + {shape})')
+        str_list.append(f'  ret = torch.stack(({expr_indices},), dim = -1).to("{device}")\n')
+        str_list.append(f'  return torch.reshape(ret, batch_dims + {shape}).to("{device}")')
     else:
         raise ValueError('expr must be a drake symbolic Expression or a list')
     func_string = ''.join(str_list)
@@ -166,8 +167,8 @@ def _fastpow_string(xpower):
     return f'{x} ** {power}'
 
 
-def _sympy_constant_string(x):
-    return f'{float(x)} * torch.ones(batch_dims)'
+def _sympy_constant_string(x, device):
+    return f'{float(x)} * torch.ones(batch_dims).to("{device}")'
 
 
 def _sympy_expression_key(expr):
@@ -260,7 +261,7 @@ def sym_to_sympy(expr, vardict):
 # @param vardict Dictionary which corresponds sympy Symbols to drake variables
 # @param sym_args An ordered list of drake symbolic variables
 # @return The variable name the expression is stored in to
-def sympy_to_pytorch_string(expr, memos, lines, vardict, sym_args):
+def sympy_to_pytorch_string(expr, memos, lines, vardict, sym_args, device):
     #pdb.set_trace()
     expr_key = _sympy_expression_key(expr)
     if expr_key in memos:
@@ -269,7 +270,7 @@ def sympy_to_pytorch_string(expr, memos, lines, vardict, sym_args):
     if issubclass(expr_top_level, sympy.Number) or \
      issubclass(expr_top_level, sympy.NumberSymbol):
         # number, add float
-        value = _sympy_constant_string(expr)
+        value = _sympy_constant_string(expr, device)
 
     elif issubclass(expr_top_level, sympy.Symbol):
         # variable, index into
@@ -291,7 +292,7 @@ def sympy_to_pytorch_string(expr, memos, lines, vardict, sym_args):
              and int(expr_args[1]) == -1:
                 expr_args = [_sympy_constant_cast(1.0), expr_args[0]]
                 torch_string_callback = _torch_ops[sympy.div]
-        args = [sympy_to_pytorch_string(arg, memos, lines, vardict, sym_args) \
+        args = [sympy_to_pytorch_string(arg, memos, lines, vardict, sym_args, device) \
          for arg in expr_args]
         value = torch_string_callback(args)
     name = f'{INTERMEDIATE_VARIABLE_PREFIX}_{len(memos)}'
